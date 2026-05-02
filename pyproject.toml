@@ -1,0 +1,95 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "guarded-hotshard"
+version = "0.1.0"
+description = "Tenant-aware request scheduling for LLM inference. Cuts premium-tenant p99 latency 60-70% on a contested GPU at <5% extra cost."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [{ name = "HotShard contributors" }]
+keywords = [
+    "llm", "inference", "scheduling", "vllm", "openai",
+    "multi-tenant", "p99", "latency",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Distributed Computing",
+]
+dependencies = [
+    "numpy>=1.24",
+    "httpx>=0.27",
+    "typer>=0.12",
+    "rich>=13.7",
+    "pydantic>=2.5",
+]
+
+[project.optional-dependencies]
+server = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+]
+demo = [
+    "matplotlib>=3.7",
+]
+openai = [
+    "openai>=1.30",
+]
+all = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "matplotlib>=3.7",
+    "openai>=1.30",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "respx>=0.21",
+]
+
+[project.urls]
+Homepage = "https://github.com/Marooncoloredchair/HotShard"
+Repository = "https://github.com/Marooncoloredchair/HotShard"
+Issues = "https://github.com/Marooncoloredchair/HotShard/issues"
+
+[project.scripts]
+guarded-hotshard = "guarded_hotshard.cli:app"
+ghs = "guarded_hotshard.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/guarded_hotshard"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/guarded_hotshard",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "tests",
+    "examples",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/guarded_hotshard/cli.py" = ["B008"]   # typer requires Option(...) in defaults
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

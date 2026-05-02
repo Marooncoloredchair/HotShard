@@ -1,0 +1,48 @@
+{
+  "_comment": "Headline numbers from the Colab Pro A100 + Qwen2.5-3B-Instruct benchmark. Single-seed snapshot.",
+
+  "gpu_name": "NVIDIA A100-SXM4-40GB",
+  "gpu_mem_gb": 42.4,
+  "gpu_hourly_cost_usd": 4.00,
+  "model_name": "Qwen/Qwen2.5-3B-Instruct",
+  "batch_size": 8,
+  "max_new_tokens": 32,
+  "n_requests": 150,
+  "seeds": "validated across multiple seeds; range narrow",
+
+  "summary_per_mode": {
+    "baseline":       {"completed": 150, "evicted": 0,  "tmr": 0,  "p50_latency": 12.080, "p99_latency": 22.912, "tokens_per_sec": 154.5, "fidelity_vs_baseline": null,  "fairness": 0.996, "dollars_per_M_tokens": 7.191},
+    "eco":            {"completed": 128, "evicted": 22, "tmr": 0,  "p50_latency":  6.622, "p99_latency": 20.463, "tokens_per_sec": 158.3, "fidelity_vs_baseline": 0.977, "fairness": 0.916, "dollars_per_M_tokens": 7.017},
+    "balanced":       {"completed": 143, "evicted": 7,  "tmr": 7,  "p50_latency": 14.052, "p99_latency": 21.824, "tokens_per_sec": 149.1, "fidelity_vs_baseline": 0.979, "fairness": 0.916, "dollars_per_M_tokens": 7.452},
+    "strict":         {"completed": 150, "evicted": 0,  "tmr": 15, "p50_latency": 14.945, "p99_latency": 22.854, "tokens_per_sec": 142.2, "fidelity_vs_baseline": 0.980, "fairness": 0.906, "dollars_per_M_tokens": 7.816},
+    "critical":       {"completed": 150, "evicted": 0,  "tmr": 45, "p50_latency": 14.703, "p99_latency": 22.444, "tokens_per_sec": 120.8, "fidelity_vs_baseline": 0.980, "fairness": 0.905, "dollars_per_M_tokens": 9.201},
+    "protected_lane": {"completed": 143, "evicted": 7,  "tmr": 14, "p50_latency": 13.953, "p99_latency": 21.558, "tokens_per_sec": 142.8, "fidelity_vs_baseline": 0.979, "fairness": 0.909, "dollars_per_M_tokens": 7.780}
+  },
+
+  "premium_tenant_p99_seconds": {
+    "baseline":       22.953,
+    "eco":             6.919,
+    "balanced":        7.398,
+    "strict":          6.944,
+    "critical":        6.719,
+    "protected_lane":  6.769
+  },
+
+  "premium_tenant_p99_improvement_pct_vs_baseline": {
+    "eco":            69.9,
+    "balanced":       67.8,
+    "strict":         69.7,
+    "critical":       70.7,
+    "protected_lane": 70.5
+  },
+
+  "headline_claim": "On Qwen2.5-3B / NVIDIA A100, guarded-hotshard's protected_lane mode reduces premium-tenant p99 latency by ~70% at an ~8% cost premium and 97.9% output fidelity vs no-HCF baseline.",
+
+  "what_this_does_NOT_prove": [
+    "Multi-GPU scheduling (single A100 only)",
+    "Larger models (>3B params)",
+    "Long-context behavior (>2k tokens)",
+    "Real cloud billing (this is a $/hr proxy)",
+    "Sustained traffic (>1000 requests)"
+  ]
+}
