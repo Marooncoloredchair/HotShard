@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "guarded-hotshard"
-version = "0.1.0"
+version = "0.2.0"
 description = "Tenant-aware request scheduling for LLM inference. Cuts premium-tenant p99 latency 60-70% on a contested GPU at <5% extra cost."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -37,6 +37,7 @@ dependencies = [
 server = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
+    "prometheus-client>=0.19",
 ]
 demo = [
     "matplotlib>=3.7",

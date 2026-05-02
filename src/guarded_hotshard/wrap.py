@@ -34,6 +34,7 @@ import time
 from collections.abc import Hashable, Iterable
 from typing import Any
 
+from guarded_hotshard.async_dispatcher import AsyncDispatcher
 from guarded_hotshard.modes import Mode, make_mode
 from guarded_hotshard.scheduler import GuardedScheduler
 
@@ -106,8 +107,8 @@ def wrap(
     ----------
     client
         Any object with `client.chat.completions.create(...)` and/or
-        `client.completions.create(...)`. Both `openai.OpenAI` and
-        `openai.AsyncOpenAI` work; for AsyncOpenAI we wrap the coroutine.
+        `client.completions.create(...)` (sync). For ``AsyncOpenAI``, use
+        :func:`wrap_async` instead.
     mode
         Mode name (`"baseline"`, `"eco"`, `"balanced"`, `"strict"`,
         `"critical"`, `"protected_lane"`) or a `Mode` instance.
@@ -173,5 +174,63 @@ def _patch(target: Any, sched: _SchedulerThread, *, kind: str) -> None:
                 except Exception:  # pragma: no cover
                     pass
             return original(*args, **kwargs)
+
+    target.create = create  # type: ignore[method-assign]
+
+
+def wrap_async(
+    client: Any,
+    *,
+    mode: str | Mode = "balanced",
+    critical_users: Iterable[Hashable] | None = None,
+    concurrency: int = 8,
+) -> Any:
+    """Wrap an *async* OpenAI client (e.g. ``AsyncOpenAI``).
+
+    Same scheduling semantics as :func:`wrap`, but each
+    ``await client.chat.completions.create(...)`` runs on ``AsyncIO``'s
+    event loop instead of a background thread.
+    """
+    if isinstance(mode, str):
+        mode = make_mode(mode)
+    crit_set: set[Hashable] = set(critical_users or [])
+    dispatcher = AsyncDispatcher(mode=mode, critical_tenants=crit_set, concurrency=concurrency)
+
+    if hasattr(client, "chat") and hasattr(client.chat, "completions"):
+        _patch_async(client.chat.completions, dispatcher, kind="chat")
+    if hasattr(client, "completions"):
+        _patch_async(client.completions, dispatcher, kind="text")
+
+    client._guarded_hotshard_async = dispatcher
+    return client
+
+
+def _patch_async(target: Any, dispatcher: AsyncDispatcher, *, kind: str) -> None:
+    original = target.create
+
+    async def create(*args: Any, **kwargs: Any) -> Any:
+        await dispatcher.ensure_started()
+        tenant = kwargs.get("user", "_unknown")
+        scored = None
+        t0 = time.time()
+        try:
+            scored = await dispatcher.submit(tenant=tenant)
+            try:
+                resp = await original(*args, **kwargs)
+                if scored.tmr:
+                    try:
+                        await original(*args, **kwargs)
+                    except Exception:  # pragma: no cover
+                        pass
+                return resp
+            finally:
+                await dispatcher.complete(scored, time.time() - t0)
+        except Exception:
+            if scored is not None:
+                try:
+                    await dispatcher.complete(scored, time.time() - t0)
+                except Exception:  # pragma: no cover
+                    pass
+            return await original(*args, **kwargs)
 
     target.create = create  # type: ignore[method-assign]

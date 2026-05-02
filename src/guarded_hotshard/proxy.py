@@ -1,25 +1,12 @@
 """OpenAI-compatible FastAPI proxy with guarded scheduling.
 
-Runs in front of any backend that speaks the OpenAI HTTP API:
+Runs in front of any backend that speaks the OpenAI HTTP API.
 
-    vllm serve qwen/Qwen2.5-3B-Instruct --port 8001
-    ghs serve --backend http://localhost:8001 --port 8000 --mode protected_lane
+Expose Prometheus metrics at ``GET /metrics`` (requires ``[server]`` extra).
 
-Then point your client at `http://localhost:8000/v1` and use the `user`
-field for tenant identification. The proxy:
-
-1. Receives the request.
-2. Scores it (tenant, criticality, hotness, F-risk).
-3. Enqueues it on a priority heap.
-4. A dispatcher coroutine pops the highest-priority request whenever a
-   backend slot frees up, and forwards it to the backend.
-5. For TMR-pinned premium-tenant traffic, it fires twice in parallel and
-   returns whichever finishes first.
-6. On *any* error, it falls back to a direct forward. Never makes things
-   worse than the backend alone.
-
-This module is optional. The package works without `fastapi`/`uvicorn`
-installed; you only need them for `ghs serve`.
+Storm-like traffic can be tagged with header ``X-GHS-Storm: 1`` or by
+listing tenant ids in ``storm_users`` (CLI: ``--storm-users``) for
+``ghs_storm_like_requests_total``.
 """
 
 from __future__ import annotations
@@ -34,95 +21,35 @@ from typing import Any
 import httpx
 
 from guarded_hotshard._version import __version__
+from guarded_hotshard.async_dispatcher import AsyncDispatcher
 from guarded_hotshard.modes import Mode, make_mode
-from guarded_hotshard.scheduler import GuardedScheduler
 
 log = logging.getLogger("guarded_hotshard.proxy")
 
 
-# ---------------------------------------------------------------------------
-# Async dispatcher
-# ---------------------------------------------------------------------------
-class AsyncDispatcher:
-    """Async cousin of `_SchedulerThread` from wrap.py.
-
-    Owns the heap, holds a semaphore for backend concurrency, and exposes
-    `submit()` which awaits both dispatch admission and request completion.
-    """
-
-    def __init__(self, mode: Mode, critical_tenants: set[Hashable], concurrency: int):
-        self.scheduler = GuardedScheduler(mode=mode, critical_tenants=critical_tenants)
-        self.concurrency = concurrency
-        self._sem = asyncio.Semaphore(concurrency)
-        self._heap_lock = asyncio.Lock()
-        self._counter = 0
-        self._wake = asyncio.Event()
-        self._task: asyncio.Task[None] | None = None
-
-    async def start(self) -> None:
-        if self._task is None:
-            self._task = asyncio.create_task(self._dispatch_loop(), name="ghs-dispatch")
-
-    async def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
-
-    async def _dispatch_loop(self) -> None:
-        while True:
-            try:
-                await asyncio.wait_for(self._wake.wait(), timeout=0.1)
-            except asyncio.TimeoutError:
-                pass
-            self._wake.clear()
-            async with self._heap_lock:
-                while self.scheduler.in_flight() < self.concurrency and self.scheduler.queue_depth() > 0:
-                    sr = self.scheduler.dispatch_next()
-                    if sr is None:
-                        break
-                    sr.request["dispatch_event"].set()
-
-    async def submit(self, *, tenant: Hashable) -> Any:
-        ev = asyncio.Event()
-        self._counter += 1
-        rid = self._counter
-        scored = self.scheduler.score(
-            request={"dispatch_event": ev},
-            request_id=rid,
-            tenant=tenant,
-            arrival_time=time.time(),
-        )
-        async with self._heap_lock:
-            self.scheduler.enqueue(scored)
-        self._wake.set()
-        await ev.wait()
-        return scored
-
-    async def complete(self, scored: Any, latency: float) -> None:
-        async with self._heap_lock:
-            self.scheduler.complete(scored, latency)
-        self._wake.set()
+def _is_storm(*, body: dict, headers: dict, storm_users: set[str]) -> bool:
+    h = {k.lower(): v for k, v in headers.items()}
+    v = h.get("x-ghs-storm", "").lower()
+    if v in ("1", "true", "yes"):
+        return True
+    user = str(body.get("user", "_unknown"))
+    return user in storm_users
 
 
-# ---------------------------------------------------------------------------
-# FastAPI app factory
-# ---------------------------------------------------------------------------
 def create_app(
     backend_url: str,
     *,
     mode: str | Mode = "balanced",
     critical_users: list[Hashable] | None = None,
+    storm_users: list[str] | None = None,
     concurrency: int = 8,
     api_key: str | None = None,
     request_timeout: float = 600.0,
+    enable_metrics: bool = True,
 ) -> Any:
     try:
         from fastapi import FastAPI, Request
-        from fastapi.responses import JSONResponse, StreamingResponse
+        from fastapi.responses import JSONResponse, Response, StreamingResponse
     except ImportError as e:  # pragma: no cover
         raise RuntimeError(
             "guarded_hotshard.proxy requires the [server] extra. "
@@ -134,14 +61,25 @@ def create_app(
     else:
         mode_obj = mode
     crit_set: set[Hashable] = set(critical_users or [])
+    storm_set: set[str] = set(storm_users or [])
     backend = backend_url.rstrip("/")
 
     dispatcher = AsyncDispatcher(mode=mode_obj, critical_tenants=crit_set, concurrency=concurrency)
 
+    metrics = None
+    if enable_metrics:
+        try:
+            from guarded_hotshard.prometheus_export import build_proxy_metrics
+
+            metrics = build_proxy_metrics(mode_obj.name, __version__)
+        except Exception as e:  # pragma: no cover
+            log.warning("Prometheus metrics disabled: %s", e)
+
     @asynccontextmanager
     async def lifespan(app):
-        await dispatcher.start()
+        await dispatcher.ensure_started()
         app.state.client = httpx.AsyncClient(timeout=request_timeout)
+        app.state.metrics = metrics
         try:
             yield
         finally:
@@ -159,6 +97,14 @@ def create_app(
     if api_key:
         headers_in["Authorization"] = f"Bearer {api_key}"
 
+    def _sync_metrics() -> None:
+        if metrics is None:
+            return
+        metrics.sync_queue_gauges(
+            dispatcher.scheduler.queue_depth(),
+            dispatcher.scheduler.in_flight(),
+        )
+
     async def _forward(method: str, path: str, *, json_body: Any, request_headers: dict) -> httpx.Response:
         url = f"{backend}{path}"
         forward_headers = {
@@ -170,20 +116,27 @@ def create_app(
             forward_headers["Authorization"] = f"Bearer {api_key}"
         return await app.state.client.request(method, url, json=json_body, headers=forward_headers)
 
-    async def _scheduled_forward(path: str, body: dict, headers: dict) -> tuple[int, dict | str, dict]:
+    async def _scheduled_forward(
+        path: str, body: dict, headers: dict, *, stream: bool = False
+    ) -> tuple[int, dict | str, dict]:
         tenant = body.get("user", "_unknown")
-        is_stream = bool(body.get("stream", False))
+        storm = _is_storm(body=body, headers=headers, storm_users=storm_set)
         scored = await dispatcher.submit(tenant=tenant)
+        _sync_metrics()
         t0 = time.time()
+        backend_primary = 0
+        backend_tmr = 0
         try:
             primary_task = asyncio.create_task(
                 _forward("POST", path, json_body=body, request_headers=headers)
             )
+            backend_primary = 1
             tmr_task: asyncio.Task[httpx.Response] | None = None
-            if scored.tmr and not is_stream:
+            if scored.tmr and not stream:
                 tmr_task = asyncio.create_task(
                     _forward("POST", path, json_body=body, request_headers=headers)
                 )
+                backend_tmr = 1
 
             if tmr_task is not None:
                 done, pending = await asyncio.wait(
@@ -199,13 +152,26 @@ def create_app(
             else:
                 resp = await primary_task
 
-            if is_stream:
-                # Caller will stream resp directly; we don't await body.
+            if stream:
                 return resp.status_code, "__stream__", dict(resp.headers)
             payload: Any = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text
             return resp.status_code, payload, dict(resp.headers)
         finally:
-            await dispatcher.complete(scored, time.time() - t0)
+            wall = time.time() - t0
+            await dispatcher.complete(scored, wall)
+            _sync_metrics()
+            if metrics is not None:
+                protected = mode_obj.name == "protected_lane" and bool(scored.tmr)
+                metrics.record_completion(
+                    tenant=tenant,
+                    wall_seconds=wall,
+                    path=path,
+                    stream=stream,
+                    storm=storm,
+                    backend_primary=backend_primary,
+                    backend_tmr=backend_tmr,
+                    protected_lane_tmr=protected,
+                )
 
     @app.get("/")
     async def index():
@@ -215,11 +181,22 @@ def create_app(
             "mode": mode_obj.name,
             "backend": backend,
             "concurrency": concurrency,
+            "metrics": "/metrics" if metrics is not None else None,
         }
 
     @app.get("/healthz")
     async def healthz():
         return {"ok": True, "queue_depth": dispatcher.scheduler.queue_depth()}
+
+    @app.get("/metrics")
+    async def metrics_endpoint():
+        if metrics is None:
+            return Response("metrics disabled", media_type="text/plain", status_code=503)
+        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+        _sync_metrics()
+        data = generate_latest(metrics.registry)
+        return Response(data, media_type=CONTENT_TYPE_LATEST)
 
     @app.get("/v1/models")
     async def list_models(request: Request):
@@ -229,8 +206,12 @@ def create_app(
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
         body = await request.json()
+        hdrs = dict(request.headers)
         if body.get("stream", False):
-            scored = await dispatcher.submit(tenant=body.get("user", "_unknown"))
+            tenant = body.get("user", "_unknown")
+            storm = _is_storm(body=body, headers=hdrs, storm_users=storm_set)
+            scored = await dispatcher.submit(tenant=tenant)
+            _sync_metrics()
             t0 = time.time()
             try:
                 req = app.state.client.build_request(
@@ -240,6 +221,7 @@ def create_app(
                     headers={**headers_in},
                 )
                 resp = await app.state.client.send(req, stream=True)
+                b_primary, b_tmr = 1, 0
 
                 async def stream_iter():
                     try:
@@ -247,26 +229,41 @@ def create_app(
                             yield chunk
                     finally:
                         await resp.aclose()
+                        wall = time.time() - t0
+                        await dispatcher.complete(scored, wall)
+                        _sync_metrics()
+                        if metrics is not None:
+                            metrics.record_completion(
+                                tenant=tenant,
+                                wall_seconds=wall,
+                                path="/v1/chat/completions",
+                                stream=True,
+                                storm=storm,
+                                backend_primary=b_primary,
+                                backend_tmr=b_tmr,
+                                protected_lane_tmr=False,
+                            )
 
                 return StreamingResponse(
                     stream_iter(),
                     status_code=resp.status_code,
                     media_type=resp.headers.get("content-type", "text/event-stream"),
                 )
-            finally:
-                await dispatcher.complete(scored, time.time() - t0)
+            except Exception:
+                wall = time.time() - t0
+                await dispatcher.complete(scored, wall)
+                _sync_metrics()
+                raise
 
         status, payload, _ = await _scheduled_forward(
-            "/v1/chat/completions", body, dict(request.headers)
+            "/v1/chat/completions", body, hdrs, stream=False
         )
         return JSONResponse(payload, status_code=status)
 
     @app.post("/v1/completions")
     async def completions(request: Request):
         body = await request.json()
-        status, payload, _ = await _scheduled_forward(
-            "/v1/completions", body, dict(request.headers)
-        )
+        status, payload, _ = await _scheduled_forward("/v1/completions", body, dict(request.headers))
         return JSONResponse(payload, status_code=status)
 
     return app
@@ -279,6 +276,7 @@ def run(
     port: int = 8000,
     mode: str = "balanced",
     critical_users: list[str] | None = None,
+    storm_users: list[str] | None = None,
     concurrency: int = 8,
     api_key: str | None = None,
     log_level: str = "info",
@@ -295,6 +293,7 @@ def run(
         backend_url,
         mode=mode,
         critical_users=critical_users,
+        storm_users=storm_users,
         concurrency=concurrency,
         api_key=api_key,
     )

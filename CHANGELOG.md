@@ -5,6 +5,17 @@ All notable changes to `guarded-hotshard` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-05-02
+
+### Added
+- Prometheus `GET /metrics` on the proxy (`[server]`): queue depth, in-flight,
+  per-tenant wall p99, backend call counts (primary vs TMR), TMR launches,
+  protected-lane activations, storm-like request classification.
+- `wrap_async()` for `AsyncOpenAI` and other async OpenAI-style clients.
+- `ghs demo` writes `demo_results/report.html` (mode table, Pareto chart link,
+  per-tenant p99, cost and fidelity proxies).
+- CLI `--storm-users` for marking noisy tenants (and header `X-GHS-Storm: 1`).
+
 ## [0.1.0] - 2026-05-01
 
 Initial public release.

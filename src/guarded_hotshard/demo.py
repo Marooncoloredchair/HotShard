@@ -329,9 +329,107 @@ async def run_demo_async(
     except Exception:  # pragma: no cover
         pass
 
+    html_path = write_demo_html(result, out_path)
+    result["report"] = str(html_path)
+
     result["json"] = str(json_path)
     result["csv"] = str(csv_path)
     return result
+
+
+def write_demo_html(result: dict[str, Any], out_dir: Path) -> Path:
+    """Write ``report.html`` next to JSON/CSV with tables + optional Pareto image."""
+    import html as html_module
+
+    out_dir = Path(out_dir)
+    cfg = result["config"]
+    pareto_name = "demo_pareto.png"
+    pareto_ok = (out_dir / pareto_name).exists()
+
+    rows_html = []
+    for r in result["summary"]:
+        fid = "-" if r["fidelity"] is None else f"{r['fidelity']:.3f}"
+        rows_html.append(
+            "<tr>"
+            f"<td>{html_module.escape(str(r['mode']))}</td>"
+            f"<td class='num'>{r['completed']}</td>"
+            f"<td class='num'>{r['evicted']}</td>"
+            f"<td class='num'>{r['tmr']}</td>"
+            f"<td class='num'>{r['p50_lat']:.3f}</td>"
+            f"<td class='num'>{r['p99_lat']:.3f}</td>"
+            f"<td class='num'>{r['tok/s']:.1f}</td>"
+            f"<td class='num'>{html_module.escape(str(fid))}</td>"
+            f"<td class='num'>{r['fairness']:.3f}</td>"
+            f"<td class='num'>{r['$/M_tok']:.3f}</td>"
+            "</tr>"
+        )
+
+    pt = result.get("per_tenant_p99") or {}
+    tenant_ids = sorted({t for d in pt.values() for t in d}, key=lambda x: (str(x),))
+    pt_header = "".join(
+        f"<th>{html_module.escape(str(m))}</th>" for m in pt.keys()
+    )
+    pt_rows = []
+    for tid in tenant_ids:
+        cells = "".join(
+            f"<td class='num'>{pt[m].get(str(tid), 0):.3f}</td>" for m in pt.keys()
+        )
+        pt_rows.append(f"<tr><th>{html_module.escape(str(tid))}</th>{cells}</tr>")
+
+    img_block = (
+        f'<figure class="pareto"><img src="{html_module.escape(pareto_name)}" '
+        f'alt="Cost vs p99 Pareto frontier"/><figcaption>Modeled cost vs p99 latency</figcaption></figure>'
+        if pareto_ok
+        else "<p><em>Pareto chart not generated (install matplotlib for demo extra).</em></p>"
+    )
+
+    body = f"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>guarded-hotshard demo report</title>
+<style>
+body {{ font-family: system-ui, sans-serif; margin: 2rem; max-width: 1200px; color: #1a1a1a; }}
+h1 {{ font-size: 1.4rem; }}
+table {{ border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.9rem; }}
+th, td {{ border: 1px solid #ccc; padding: 0.4rem 0.6rem; text-align: left; }}
+th {{ background: #f4f4f4; }}
+td.num, th.num {{ text-align: right; }}
+figure.pareto img {{ max-width: 100%; height: auto; }}
+.meta {{ color: #444; font-size: 0.9rem; margin-bottom: 1.5rem; }}
+</style></head><body>
+<h1>guarded-hotshard demo report</h1>
+<div class="meta">
+Backend: {html_module.escape(str(cfg['backend_url']))}<br/>
+Model: {html_module.escape(str(cfg['model']))}<br/>
+Workload: {cfg['n_requests']} requests, {cfg['n_tenants']} tenants, seed {cfg['seed']}<br/>
+Concurrency: {cfg['concurrency']}, max_tokens: {cfg['max_tokens']}, hourly_cost: ${cfg['hourly_cost_usd']}/GPU-hr (proxy)
+</div>
+
+<h2>Summary by mode</h2>
+<table>
+<thead><tr>
+<th>mode</th><th class="num">completed</th><th class="num">evicted</th><th class="num">tmr</th>
+<th class="num">p50&nbsp;s</th><th class="num">p99&nbsp;s</th><th class="num">tok/s</th>
+<th class="num">fidelity</th><th class="num">fairness</th><th class="num">$/M&nbsp;tok</th>
+</tr></thead>
+<tbody>
+{''.join(rows_html)}
+</tbody></table>
+
+<h2>Per-tenant p99 wall latency (s)</h2>
+<table>
+<thead><tr><th>tenant</th>{pt_header}</tr></thead>
+<tbody>{''.join(pt_rows)}</tbody>
+</table>
+
+<h2>Pareto frontier</h2>
+{img_block}
+<p><small>Raw data: <code>demo_results.json</code>, <code>demo_per_request.csv</code></small></p>
+</body></html>"""
+
+    path = out_dir / "report.html"
+    path.write_text(body, encoding="utf-8")
+    return path
 
 
 def _save_pareto(rows: list[dict[str, Any]], png_path: Path) -> None:

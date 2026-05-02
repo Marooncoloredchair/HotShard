@@ -16,7 +16,7 @@ from guarded_hotshard.layers import (
 )
 from guarded_hotshard.modes import MODES, Mode, make_mode
 from guarded_hotshard.scheduler import GuardedScheduler, ScoredRequest
-from guarded_hotshard.wrap import wrap
+from guarded_hotshard.wrap import wrap, wrap_async
 
 __all__ = [
     "__version__",
@@ -26,6 +26,7 @@ __all__ = [
     "GuardedScheduler",
     "ScoredRequest",
     "wrap",
+    "wrap_async",
     "G_Hysteresis",
     "A_KLDrift",
     "F_LeadTime",

@@ -138,6 +138,8 @@ def demo(
     console.print(f"[green]Saved:[/green] {result['csv']}")
     if result.get("plot"):
         console.print(f"[green]Saved:[/green] {result['plot']}")
+    if result.get("report"):
+        console.print(f"[green]Saved:[/green] {result['report']}")
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +152,11 @@ def serve(
     port: int = typer.Option(8000, "--port", "-p"),
     mode: str = typer.Option("balanced", "--mode", "-m", help=f"One of: {', '.join(MODES)}"),
     critical_users: str | None = typer.Option(None, "--critical-users", help="Comma-separated user ids to treat as critical"),
+    storm_users: str | None = typer.Option(
+        None,
+        "--storm-users",
+        help="Comma-separated tenant ids counted as storm-like for Prometheus (X-GHS-Storm: 1 also)",
+    ),
     concurrency: int = typer.Option(8, "--concurrency", "-c"),
     api_key: str | None = typer.Option(None, "--api-key", "-k", envvar="OPENAI_API_KEY"),
     log_level: str = typer.Option("info", "--log-level"),
@@ -165,6 +172,7 @@ def serve(
         raise typer.Exit(code=1) from e
 
     crit = [u.strip() for u in critical_users.split(",")] if critical_users else None
+    storm = [u.strip() for u in storm_users.split(",")] if storm_users else None
     console.print(
         f"[bold green]ghs serve[/bold green]  "
         f"mode=[cyan]{mode}[/cyan]  backend=[cyan]{backend}[/cyan]  "
@@ -172,12 +180,15 @@ def serve(
     )
     if crit:
         console.print(f"  critical users: [magenta]{', '.join(crit)}[/magenta]")
+    if storm:
+        console.print(f"  storm-like tenants (metrics): [magenta]{', '.join(storm)}[/magenta]")
     proxy_run(
         backend,
         host=host,
         port=port,
         mode=mode,
         critical_users=crit,
+        storm_users=storm,
         concurrency=concurrency,
         api_key=api_key,
         log_level=log_level,
